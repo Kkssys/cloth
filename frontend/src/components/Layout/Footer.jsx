@@ -52,9 +52,9 @@ const Footer = () => {
   };
 
   const socialMedia = [
-    { name: 'Instagram', icon: '📷', url: 'https://instagram.com', color: '#e4405f' },
-    { name: 'Facebook', icon: '📘', url: 'https://facebook.com', color: '#1877f2' },
-    { name: 'WhatsApp', icon: '💬', url: 'https://wa.me/1234567890', color: '#25D366' }
+    { name: 'Instagram', icon: <i className="bi bi-instagram"></i>, url: 'https://instagram.com', color: '#e4405f' },
+    { name: 'Facebook', icon: <i className="bi bi-facebook"></i>, url: 'https://facebook.com', color: '#1877f2' },
+    { name: 'WhatsApp', icon: <i className="bi bi-whatsapp"></i>, url: 'https://wa.me/1234567890', color: '#25D366' }
   ];
 
   return (

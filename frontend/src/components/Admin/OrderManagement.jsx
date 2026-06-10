@@ -36,7 +36,7 @@ const OrderManagement = () => {
     Processing: '#dbeafe',
     Shipped: '#d1fae5',
     Delivered: '#a7f3d0',
-    Cancelled: '#fee2e2',
+    Cancelled: '#e83737',
   };
 
   const styles = {

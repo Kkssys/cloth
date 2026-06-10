@@ -12,6 +12,7 @@ import wishlistRoutes from './routes/wishlistRoutes.js';
 import couponRoutes from './routes/couponRoutes.js';
 import { errorHandler, notFound } from './middleware/errorMiddleware.js';
 import addressRoutes from './routes/addressRoutes.js';
+import paymentRoutes from './routes/paymentRoutes.js';
 
 
 
@@ -40,6 +41,7 @@ app.use('/api/wishlist', wishlistRoutes);
 app.use('/api/coupons', couponRoutes);
 // Add this with other routes
 app.use('/api/addresses', addressRoutes);
+app.use('/api/payments', paymentRoutes);
 
 
 // Health check

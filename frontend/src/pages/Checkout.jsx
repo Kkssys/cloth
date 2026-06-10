@@ -3,15 +3,30 @@ import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import axios from '../utils/axios';
 import toast from 'react-hot-toast';
-import AddressManager from '../components/User/AddressManager';
 import { clearCart } from '../redux/slices/cartSlice';
+import CheckoutSteps from '../components/Checkout/CheckoutSteps';
+import AddressForm from '../components/Checkout/AddressForm';
+import OrderSummary from '../components/Checkout/OrderSummary';
+import PaymentComponent from '../components/Checkout/PaymentComponent';
+import { loadRazorpayScript, openRazorpayCheckout } from '../utils/razorpay';
 
 const Checkout = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const { cart } = useSelector((state) => state.cart);
   const { userInfo } = useSelector((state) => state.auth);
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+  const isMobile = windowWidth <= 768;
 
+  useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const [currentStep, setCurrentStep] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [errors, setErrors] = useState({});
   const [shippingAddress, setShippingAddress] = useState({
     fullName: userInfo?.name || '',
     street: '',
@@ -23,14 +38,7 @@ const Checkout = () => {
     phone: '',
     email: userInfo?.email || '',
   });
-
-  const [paymentMethod, setPaymentMethod] = useState('cod');
-  const [loading, setLoading] = useState(false);
-  const [errors, setErrors] = useState({});
-  const [showAddressSelector, setShowAddressSelector] = useState(false);
-  const [estimatedDelivery, setEstimatedDelivery] = useState(null);
-  const [savedAddresses, setSavedAddresses] = useState([]);
-  const [loadingAddresses, setLoadingAddresses] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState('razorpay'); // Changed default to razorpay
 
   const subtotal = cart?.totalPrice || 0;
   const FREE_SHIPPING_THRESHOLD = 1500;
@@ -38,25 +46,7 @@ const Checkout = () => {
   const tax = subtotal * 0.05;
   const total = subtotal + shipping + tax;
 
-  // Fetch saved addresses
-  useEffect(() => {
-    if (userInfo) {
-      fetchSavedAddresses();
-    }
-  }, [userInfo]);
-
-  const fetchSavedAddresses = async () => {
-    try {
-      setLoadingAddresses(true);
-      const { data } = await axios.get('/addresses');
-      setSavedAddresses(data.addresses || []);
-    } catch (error) {
-      console.error('Error fetching addresses:', error);
-    } finally {
-      setLoadingAddresses(false);
-    }
-  };
-
+  // Calculate estimated delivery based on state
   const calculateEstimatedDelivery = (state) => {
     if (!state) return null;
     
@@ -83,32 +73,16 @@ const Checkout = () => {
     };
   };
 
+  const [estimatedDelivery, setEstimatedDelivery] = useState(null);
+
   useEffect(() => {
     if (shippingAddress.state) {
       const delivery = calculateEstimatedDelivery(shippingAddress.state);
       setEstimatedDelivery(delivery);
-    } else {
-      setEstimatedDelivery(null);
     }
   }, [shippingAddress.state]);
 
-  const handleAddressSelect = (address) => {
-    setShippingAddress({
-      fullName: address.fullName,
-      street: address.street,
-      city: address.city,
-      district: address.district || '',
-      state: address.state,
-      zipCode: address.zipCode,
-      country: address.country,
-      phone: address.phone,
-      email: shippingAddress.email,
-    });
-    toast.success('Address loaded successfully!');
-    setShowAddressSelector(false);
-  };
-
-  const validateForm = () => {
+  const validateAddressForm = () => {
     const newErrors = {};
 
     if (!shippingAddress.fullName.trim()) newErrors.fullName = 'Full name is required';
@@ -137,24 +111,22 @@ const Checkout = () => {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setShippingAddress({ ...shippingAddress, [name]: value });
-    if (errors[name]) {
-      setErrors({ ...errors, [name]: '' });
+  const handleNext = () => {
+    if (currentStep === 1 && validateAddressForm()) {
+      setCurrentStep(2);
+      window.scrollTo(0, 0);
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    
-    if (!validateForm()) {
-      toast.error('Please fill in all required fields correctly');
-      return;
-    }
+  const handleBack = () => {
+    setCurrentStep(currentStep - 1);
+    window.scrollTo(0, 0);
+  };
 
+  const handlePlaceOrder = async () => {
     if (!cart || cart.items?.length === 0) {
       toast.error('Your cart is empty');
+      navigate('/products');
       return;
     }
 
@@ -179,7 +151,7 @@ const Checkout = () => {
         color: item.color,
       })),
       shippingAddress,
-      paymentMethod,
+      paymentMethod: paymentMethod === 'razorpay' ? 'razorpay' : 'cod',
       itemsPrice: subtotal,
       taxPrice: tax,
       shippingPrice: shipping,
@@ -188,213 +160,199 @@ const Checkout = () => {
     };
 
     try {
-      const response = await axios.post('/orders', orderData);
+      // First, create the order in database
+      const orderResponse = await axios.post('/orders', orderData);
       
-      if (response.data.success) {
+      if (!orderResponse.data.success) {
+        toast.error(orderResponse.data.message || 'Failed to create order');
+        setLoading(false);
+        return;
+      }
+
+      const savedOrder = orderResponse.data.order;
+
+      // If COD, just redirect to orders page
+      if (paymentMethod === 'cod') {
         toast.success('Order placed successfully!');
         dispatch(clearCart());
         navigate('/orders');
-      } else {
-        toast.error(response.data.message || 'Failed to place order');
+        setLoading(false);
+        return;
       }
+
+      // For Razorpay - Create payment order
+      const razorpayOrderResponse = await axios.post('/payments/create-order', {
+        amount: total,
+        orderId: savedOrder._id,
+      });
+
+      if (!razorpayOrderResponse.data.success) {
+        toast.error('Failed to initialize payment');
+        setLoading(false);
+        return;
+      }
+
+      // Load Razorpay script
+      const isScriptLoaded = await loadRazorpayScript();
+      if (!isScriptLoaded) {
+        toast.error('Failed to load payment gateway. Please try again.');
+        setLoading(false);
+        return;
+      }
+
+      // Enhanced Razorpay options with better UPI and wallet support
+      const options = {
+        key: razorpayOrderResponse.data.key,
+        amount: razorpayOrderResponse.data.amount,
+        currency: razorpayOrderResponse.data.currency,
+        name: 'FashionStore',
+        description: `Order #${savedOrder._id.slice(-8)}`,
+        order_id: razorpayOrderResponse.data.id,
+        prefill: {
+          name: userInfo?.name || shippingAddress.fullName,
+          email: userInfo?.email || shippingAddress.email,
+          contact: shippingAddress.phone,
+        },
+        theme: { 
+          color: '#4f46e5',
+          hide_topbar: false
+        },
+        // Enable all payment methods including UPI and wallets
+        method: {
+          upi: true,
+          card: true,
+          netbanking: true,
+          wallet: true,
+          paylater: true
+        },
+        // Configure UPI options
+        upi: {
+          flow: 'collect', // 'collect' or 'intent'
+          mode: 'embedded' // 'embedded' or 'popup'
+        },
+        // Enable external wallets
+        external: {
+          wallets: ['googlepay', 'phonepe', 'paytm', 'amazonpay']
+        },
+        modal: {
+          ondismiss: () => {
+            toast.error('Payment cancelled');
+            setLoading(false);
+          },
+          escape: false,
+          backdropclose: false,
+          confirm_close: {
+            enable: true,
+            message: 'Are you sure you want to cancel the payment?'
+          }
+        },
+        // Add handler for UPI intent
+        handler: function(response) {
+          // This is for backward compatibility
+          console.log('Payment response:', response);
+        }
+      };
+
+      // Open Razorpay checkout
+      const rzp = new window.Razorpay(options);
+      
+      rzp.on('payment.failed', (response) => {
+        console.error('Payment failed:', response);
+        const errorMessage = response.error?.description || 'Payment failed. Please try again.';
+        toast.error(errorMessage);
+        setLoading(false);
+      });
+
+      rzp.on('payment.success', async (response) => {
+        // Verify payment
+        try {
+          const verifyResponse = await axios.post('/payments/verify-payment', {
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature,
+            orderId: savedOrder._id,
+          });
+
+          if (verifyResponse.data.success) {
+            toast.success('Payment successful! Order placed successfully!');
+            dispatch(clearCart());
+            navigate('/orders');
+          } else {
+            toast.error('Payment verification failed. Please contact support.');
+          }
+        } catch (error) {
+          console.error('Verification error:', error);
+          toast.error('Payment verification failed. Please contact support.');
+        }
+        setLoading(false);
+      });
+
+      // Handle UPI intent redirection
+      rzp.on('upi.intent', (event) => {
+        console.log('UPI Intent triggered:', event);
+        toast.loading('Redirecting to UPI app...', { duration: 2000 });
+      });
+
+      rzp.open();
+
     } catch (error) {
       console.error('Order error:', error);
       toast.error(error.response?.data?.message || 'Failed to place order');
-    } finally {
       setLoading(false);
     }
   };
 
   const styles = {
-    container: { maxWidth: '1280px', margin: '2rem auto', padding: '0 1rem' },
-    title: { fontSize: '1.875rem', fontWeight: 'bold', marginBottom: '2rem' },
-    grid: { display: 'flex', flexDirection: 'row', flexWrap: 'wrap', gap: '2rem' },
-    formSection: { flex: 2 },
-    summarySection: { flex: 1 },
-    card: { backgroundColor: 'white', padding: '1.5rem', borderRadius: '0.5rem', boxShadow: '0 1px 3px 0 rgba(0,0,0,0.1)', marginBottom: '1.5rem' },
-    cardTitle: { fontSize: '1.25rem', fontWeight: 'bold', marginBottom: '1rem', paddingBottom: '0.5rem', borderBottom: '2px solid #4f46e5', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' },
-    useSavedBtn: { backgroundColor: '#10b981', color: 'white', padding: '0.5rem 1rem', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontSize: '0.875rem' },
-    formGroup: { marginBottom: '1rem' },
-    label: { display: 'block', fontWeight: '500', marginBottom: '0.25rem', color: '#374151' },
-    requiredStar: { color: '#ef4444', marginLeft: '0.25rem' },
-    input: { width: '100%', padding: '0.5rem 0.75rem', border: '1px solid #d1d5db', borderRadius: '0.375rem', fontSize: '1rem' },
-    inputError: { width: '100%', padding: '0.5rem 0.75rem', border: '1px solid #ef4444', borderRadius: '0.375rem', fontSize: '1rem', backgroundColor: '#fef2f2' },
-    errorMessage: { color: '#ef4444', fontSize: '0.75rem', marginTop: '0.25rem' },
-    row: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' },
-    radioGroup: { display: 'flex', gap: '1.5rem', flexWrap: 'wrap' },
-    radioLabel: { display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', padding: '0.5rem', border: '1px solid #d1d5db', borderRadius: '0.375rem', backgroundColor: '#f9fafb' },
-    radioLabelSelected: { display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', padding: '0.5rem', border: '2px solid #4f46e5', borderRadius: '0.375rem', backgroundColor: '#eef2ff' },
-    summary: { backgroundColor: '#f9fafb', borderRadius: '0.5rem', padding: '1.5rem', position: 'sticky', top: '5rem' },
-    summaryRow: { display: 'flex', justifyContent: 'space-between', marginBottom: '0.75rem' },
-    summaryTotal: { borderTop: '1px solid #e5e7eb', marginTop: '0.75rem', paddingTop: '0.75rem', fontWeight: 'bold', fontSize: '1.125rem' },
-    submitBtn: { width: '100%', backgroundColor: '#4f46e5', color: 'white', padding: '0.75rem', border: 'none', borderRadius: '0.5rem', fontSize: '1rem', fontWeight: 'bold', cursor: 'pointer', marginTop: '1rem' },
-    submitBtnDisabled: { width: '100%', backgroundColor: '#9ca3af', color: '#e5e7eb', padding: '0.75rem', border: 'none', borderRadius: '0.5rem', fontSize: '1rem', fontWeight: 'bold', cursor: 'not-allowed', marginTop: '1rem' },
-    modalOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
-    modalContent: { backgroundColor: 'white', borderRadius: '0.5rem', maxWidth: '600px', width: '90%', maxHeight: '90vh', overflowY: 'auto', position: 'relative' },
-    modalClose: { position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', fontSize: '1.5rem', cursor: 'pointer', color: '#6b7280' },
-    deliveryCard: { backgroundColor: estimatedDelivery?.isTamilNadu ? '#d1fae5' : '#fed7aa', borderRadius: '0.5rem', padding: '1rem', marginTop: '1rem', textAlign: 'center' },
-    deliveryTitle: { fontSize: '0.875rem', color: estimatedDelivery?.isTamilNadu ? '#065f46' : '#92400e', marginBottom: '0.25rem' },
-    deliveryDate: { fontSize: '1.125rem', fontWeight: 'bold', color: estimatedDelivery?.isTamilNadu ? '#065f46' : '#92400e' },
-    deliveryNote: { fontSize: '0.7rem', color: estimatedDelivery?.isTamilNadu ? '#065f46' : '#92400e', marginTop: '0.25rem' },
-    infoText: { fontSize: '0.7rem', color: '#6b7280', marginTop: '0.25rem' },
+    container: {
+      maxWidth: isMobile ? '100%' : '900px',
+      margin: isMobile ? '1rem auto' : '2rem auto',
+      padding: isMobile ? '0 12px' : '0 1rem',
+    },
+    title: {
+      fontSize: isMobile ? '24px' : '30px',
+      fontWeight: 'bold',
+      marginBottom: isMobile ? '1.5rem' : '2rem',
+      textAlign: 'center',
+    },
   };
 
   return (
     <div style={styles.container}>
       <h1 style={styles.title}>Checkout</h1>
-
-      <div style={styles.grid}>
-        <div style={styles.formSection}>
-          <form onSubmit={handleSubmit}>
-            {/* Shipping Address Section */}
-            <div style={styles.card}>
-              <div style={styles.cardTitle}>
-                <span>📮 Shipping Address</span>
-                <button 
-                  type="button" 
-                  onClick={() => setShowAddressSelector(true)} 
-                  style={styles.useSavedBtn}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#059669'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#10b981'}
-                >
-                  📚 Use Saved Address
-                </button>
-              </div>
-
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Full Name <span style={styles.requiredStar}>*</span></label>
-                <input type="text" name="fullName" value={shippingAddress.fullName} onChange={handleInputChange} style={errors.fullName ? styles.inputError : styles.input} placeholder="Enter your full name" />
-                {errors.fullName && <div style={styles.errorMessage}>{errors.fullName}</div>}
-              </div>
-
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Street Address <span style={styles.requiredStar}>*</span></label>
-                <input type="text" name="street" value={shippingAddress.street} onChange={handleInputChange} style={errors.street ? styles.inputError : styles.input} placeholder="House number, street name" />
-                {errors.street && <div style={styles.errorMessage}>{errors.street}</div>}
-              </div>
-
-              <div style={styles.row}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>City <span style={styles.requiredStar}>*</span></label>
-                  <input type="text" name="city" value={shippingAddress.city} onChange={handleInputChange} style={errors.city ? styles.inputError : styles.input} placeholder="Enter city" />
-                  {errors.city && <div style={styles.errorMessage}>{errors.city}</div>}
-                </div>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>District <span style={styles.requiredStar}>*</span></label>
-                  <input type="text" name="district" value={shippingAddress.district} onChange={handleInputChange} style={errors.district ? styles.inputError : styles.input} placeholder="Enter district" />
-                  {errors.district && <div style={styles.errorMessage}>{errors.district}</div>}
-                </div>
-              </div>
-
-              <div style={styles.row}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>State <span style={styles.requiredStar}>*</span></label>
-                  <input type="text" name="state" value={shippingAddress.state} onChange={handleInputChange} style={errors.state ? styles.inputError : styles.input} placeholder="Enter state" />
-                  {errors.state && <div style={styles.errorMessage}>{errors.state}</div>}
-                  <div style={styles.infoText}>💡 Delivery time is calculated based on State - 3 days for Tamil Nadu, 7-10 days for other states</div>
-                </div>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Zip Code <span style={styles.requiredStar}>*</span></label>
-                  <input type="text" name="zipCode" value={shippingAddress.zipCode} onChange={handleInputChange} style={errors.zipCode ? styles.inputError : styles.input} placeholder="Enter zip code" />
-                  {errors.zipCode && <div style={styles.errorMessage}>{errors.zipCode}</div>}
-                </div>
-              </div>
-
-              <div style={styles.row}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Country <span style={styles.requiredStar}>*</span></label>
-                  <input type="text" name="country" value={shippingAddress.country} onChange={handleInputChange} style={errors.country ? styles.inputError : styles.input} placeholder="Enter country" />
-                  {errors.country && <div style={styles.errorMessage}>{errors.country}</div>}
-                </div>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Phone Number <span style={styles.requiredStar}>*</span></label>
-                  <input type="tel" name="phone" value={shippingAddress.phone} onChange={handleInputChange} style={errors.phone ? styles.inputError : styles.input} placeholder="10-digit mobile number" />
-                  {errors.phone && <div style={styles.errorMessage}>{errors.phone}</div>}
-                </div>
-              </div>
-
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Email Address <span style={styles.requiredStar}>*</span></label>
-                <input type="email" name="email" value={shippingAddress.email} onChange={handleInputChange} style={errors.email ? styles.inputError : styles.input} placeholder="your@email.com" />
-                {errors.email && <div style={styles.errorMessage}>{errors.email}</div>}
-              </div>
-
-              {estimatedDelivery && (
-                <div style={styles.deliveryCard}>
-                  <div style={styles.deliveryTitle}>
-                    {estimatedDelivery.isTamilNadu ? '🚚 Fast Delivery' : '🚚 Standard Delivery'}
-                  </div>
-                  <div style={styles.deliveryDate}>
-                    Estimated Delivery: {estimatedDelivery.date}
-                  </div>
-                  <div style={styles.deliveryNote}>
-                    {estimatedDelivery.isTamilNadu 
-                      ? '✨ Delivered within 3 days of order confirmation (Tamil Nadu)' 
-                      : `📦 Delivered within ${estimatedDelivery.daysUntil} days (7-10 days for your state)`}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Payment Method Section */}
-            <div style={styles.card}>
-              <h2 style={styles.cardTitle}>💳 Payment Method</h2>
-              <div style={styles.radioGroup}>
-                <label style={paymentMethod === 'cod' ? styles.radioLabelSelected : styles.radioLabel}>
-                  <input type="radio" value="cod" checked={paymentMethod === 'cod'} onChange={(e) => setPaymentMethod(e.target.value)} />
-                  💵 Cash on Delivery (COD)
-                </label>
-                <label style={paymentMethod === 'razorpay' ? styles.radioLabelSelected : styles.radioLabel}>
-                  <input type="radio" value="razorpay" checked={paymentMethod === 'razorpay'} onChange={(e) => setPaymentMethod(e.target.value)} />
-                  💳 Online Payment (Razorpay)
-                </label>
-              </div>
-            </div>
-          </form>
-        </div>
-
-        {/* Order Summary */}
-        <div style={styles.summarySection}>
-          <div style={styles.summary}>
-            <h2 style={styles.cardTitle}>Order Summary</h2>
-
-            <div>
-              <div style={styles.summaryRow}>
-                <span>Subtotal</span>
-                <span>₹{subtotal.toLocaleString()}</span>
-              </div>
-              <div style={styles.summaryRow}>
-                <span>Shipping</span>
-                <span>{shipping === 0 ? 'Free' : `₹${shipping}`}</span>
-              </div>
-              <div style={styles.summaryRow}>
-                <span>Tax (5%)</span>
-                <span>₹{tax.toLocaleString()}</span>
-              </div>
-              <div style={{ ...styles.summaryRow, ...styles.summaryTotal }}>
-                <span>Total</span>
-                <span style={{ color: '#4f46e5' }}>₹{total.toLocaleString()}</span>
-              </div>
-            </div>
-
-            <button onClick={handleSubmit} disabled={loading} style={loading ? styles.submitBtnDisabled : styles.submitBtn}>
-              {loading ? '⏳ Placing Order...' : '✅ Place Order'}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Address Selector Modal */}
-      {showAddressSelector && (
-        <div style={styles.modalOverlay} onClick={() => setShowAddressSelector(false)}>
-          <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
-            <button onClick={() => setShowAddressSelector(false)} style={styles.modalClose}>×</button>
-            <AddressManager 
-              onAddressSelect={handleAddressSelect} 
-              onClose={() => setShowAddressSelector(false)} 
-            />
-          </div>
-        </div>
+      
+      <CheckoutSteps currentStep={currentStep} />
+      
+      {currentStep === 1 && (
+        <AddressForm
+          formData={shippingAddress}
+          setFormData={setShippingAddress}
+          errors={errors}
+          onNext={handleNext}
+        />
+      )}
+      
+      {currentStep === 2 && (
+        <OrderSummary
+          cart={cart}
+          shippingAddress={shippingAddress}
+          subtotal={subtotal}
+          shipping={shipping}
+          tax={tax}
+          total={total}
+          estimatedDelivery={estimatedDelivery}
+          onNext={() => setCurrentStep(3)}
+          onBack={handleBack}
+        />
+      )}
+      
+      {currentStep === 3 && (
+        <PaymentComponent
+          paymentMethod={paymentMethod}
+          setPaymentMethod={setPaymentMethod}
+          onBack={handleBack}
+          onSubmit={handlePlaceOrder}
+          loading={loading}
+        />
       )}
     </div>
   );
