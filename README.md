@@ -1,4 +1,4 @@
-This is a app used to sell cloyhs easily .
+This is a app used to sell cloyhs easily .<br>
 It is simple and good for sellers as they can post new stocks easily and can delete it. <br>
 <br>
 <br>
