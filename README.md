@@ -8,3 +8,7 @@ This is the view in pc .<br>
 <br> 
 This is in mobile view. <br>
 <img width="1181" height="1080" alt="Screenshot (58)" src="https://github.com/user-attachments/assets/e9f2c487-03aa-4d86-837f-d921a11b2865" />
+<br>
+<br>
+The admin panel looks like this .<br>
+<img width="1920" height="1080" alt="Screenshot (52)" src="https://github.com/user-attachments/assets/70306ccf-4fdf-4a10-ac5f-b5554f53ccae" />
